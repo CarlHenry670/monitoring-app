@@ -1,12 +1,14 @@
+// screens/ModeSelectionScreen.js
+
 import React from 'react';
 import { View, Text, TouchableOpacity, StyleSheet } from 'react-native';
 import Icon from 'react-native-vector-icons/FontAwesome5';
 
 export default function ModeSelectionScreen({ navigation }) {
   const modes = [
-    { name: 'Andar', goal: 5, icon: 'walking' },
-    { name: 'Correr', goal: 10, icon: 'running' },
-    { name: 'Ciclismo', goal: 15, icon: 'bicycle' },
+    { name: 'Andar', goal: 5, icon: 'walking' },   // 5 passos
+    { name: 'Correr', goal: 10, icon: 'running' }, // 10 passos
+    { name: 'Ciclismo', goal: 10, icon: 'bicycle' } // 10 km
   ];
 
   return (
@@ -28,10 +30,11 @@ export default function ModeSelectionScreen({ navigation }) {
   );
 }
 
+// Estilos:
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#fff5ee', // Um off-white ou algo suave
+    backgroundColor: '#fff5ee',
     padding: 20,
   },
   title: {

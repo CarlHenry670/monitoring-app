@@ -1,52 +1,72 @@
+// screens/ActivityScreen.js
+
 import React, { useState, useEffect } from 'react';
-import { View, Text, StyleSheet, Modal, TouchableOpacity } from 'react-native';
+import { View, Text, StyleSheet, Modal, TouchableOpacity, Platform } from 'react-native';
 import { Accelerometer } from 'expo-sensors';
 import { Audio } from 'expo-av';
 import * as Progress from 'react-native-progress';
+import * as Location from 'expo-location';
+
+// -- Se quiser usar a fórmula de Haversine, crie ou importe daqui mesmo:
+function haversineDistance(lat1, lon1, lat2, lon2) {
+  const R = 6371; // Raio médio da Terra em km
+  const dLat = ((lat2 - lat1) * Math.PI) / 180;
+  const dLon = ((lon2 - lon1) * Math.PI) / 180;
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos((lat1 * Math.PI) / 180) * Math.cos((lat2 * Math.PI) / 180) *
+    Math.sin(dLon / 2) * Math.sin(dLon / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R * c; // Resultado em km
+}
 
 export default function ActivityScreen({ route }) {
   const { mode } = route.params;
+  // Verifica se é ciclismo para decidir qual lógica usar
+  const isCycling = (mode.name === 'Ciclismo');
 
-  // Ajustes específicos para cada modo
-  const modesConfig = {
-    'Andar': {
-      stepThreshold: 1.0,
-      minStepInterval: 400, // em ms
-    },
-    'Correr': {
-      stepThreshold: 1.3,
-      minStepInterval: 250,
-    },
-    'Ciclismo': {
-      stepThreshold: 1.8,
-      minStepInterval: 150,
-    },
-  };
+  // ---------------------------
+  // ESTADOS GERAIS
+  // ---------------------------
+  const [isCounting, setIsCounting] = useState(false);
+  const [showModal, setShowModal] = useState(false);
+  const [sound, setSound] = useState(null);
 
-  // Pegamos do objeto modesConfig ou usamos valores padrão
-  const { stepThreshold, minStepInterval } = modesConfig[mode.name] || {
-    stepThreshold: 1.0,
-    minStepInterval: 300,
-  };
-
-  const [data, setData] = useState({ x: 0, y: 0, z: 0 });
+  // ---------------------------
+  // ESTADOS PARA CAMINHAR/CORRER
+  // ---------------------------
   const [steps, setSteps] = useState(0);
   const [lastStepTime, setLastStepTime] = useState(0);
-  const [isCounting, setIsCounting] = useState(false);
-  const [sound, setSound] = useState(null);
-  const [showModal, setShowModal] = useState(false);
 
+  // Definindo thresholds e intervalos para cada modo de passo
+  const walkRunConfig = {
+    'Andar':  { threshold: 1.0, minInterval: 400 },
+    'Correr': { threshold: 1.3, minInterval: 250 },
+  };
+  // Pega config conforme o modo. Se não existir, usa algo padrão.
+  const { threshold, minInterval } = walkRunConfig[mode.name] || {
+    threshold: 1.0,
+    minInterval: 300,
+  };
+
+  // ---------------------------
+  // ESTADOS PARA CICLISMO (GPS)
+  // ---------------------------
+  const [distance, setDistance] = useState(0);     // em km
+  const [lastLocation, setLastLocation] = useState(null);
+  const [locationWatcher, setLocationWatcher] = useState(null);
+
+  // ---------------------------
+  // CARREGAR SOM (passos)
+  // ---------------------------
   useEffect(() => {
-    // Carrega o som
-    const loadSound = async () => {
+    (async () => {
       const { sound } = await Audio.Sound.createAsync(
         require('../assets/sounds/soundsteps-248147_vwqDd8Qc.mp3')
       );
       setSound(sound);
-    };
-    loadSound();
+    })();
 
-    // Descarrega o som ao desmontar
     return () => {
       if (sound) {
         sound.unloadAsync();
@@ -60,93 +80,233 @@ export default function ActivityScreen({ route }) {
     }
   };
 
+  // ------------------------------------------------------------------
+  // useEffect para LÓGICA DE CAMINHAR/CORRER (ACELERÔMETRO)
+  // Somente ativo se NÃO for ciclismo e se isCounting = true
+  // ------------------------------------------------------------------
   useEffect(() => {
-    // Listener do acelerômetro
-    const subscription = Accelerometer.addListener((accelerometerData) => {
-      setData(accelerometerData);
+    let accelerometerSubscription;
 
-      const currentTime = Date.now();
-      const { x, y, z } = accelerometerData;
+    if (!isCycling && isCounting) {
+      accelerometerSubscription = Accelerometer.addListener((accelerometerData) => {
+        const currentTime = Date.now();
+        const { x, y, z } = accelerometerData;
 
-      // Verifica se estamos contando e se passamos do threshold
-      if (
-        isCounting &&
-        Math.abs(z) > stepThreshold &&
-        currentTime - lastStepTime > minStepInterval
-      ) {
-        setSteps((prevSteps) => prevSteps + 1);
-        setLastStepTime(currentTime);
-        playSound();
+        if (
+          Math.abs(z) > threshold &&
+          currentTime - lastStepTime > minInterval
+        ) {
+          setSteps((prev) => prev + 1);
+          setLastStepTime(currentTime);
+          playSound();
+        }
+      });
+
+      // Frequência de atualização (ms)
+      Accelerometer.setUpdateInterval(100);
+    }
+
+    // Cleanup
+    return () => {
+      if (accelerometerSubscription) {
+        accelerometerSubscription.remove();
       }
-    });
+    };
+  }, [isCycling, isCounting, threshold, minInterval, lastStepTime]);
 
-    // Ajusta a frequência de atualização (em ms)
-    Accelerometer.setUpdateInterval(100);
-
-    return () => subscription && subscription.remove();
-  }, [isCounting, lastStepTime, stepThreshold, minStepInterval]);
-
+  // ------------------------------------------------------------------
+  // useEffect para LÓGICA DE CICLISMO (GPS)
+  // Somente ativo se for ciclismo e isCounting = true
+  // ------------------------------------------------------------------
   useEffect(() => {
-    // Ao atingir a meta, exibe modal
-    if (steps >= mode.goal) {
+    let subscription;
+    
+    async function startLocationUpdates() {
+      // Pede permissão
+      const { status } = await Location.requestForegroundPermissionsAsync();
+      if (status !== 'granted') {
+        alert('Permissão de localização negada!');
+        return;
+      }
+
+      // Inicia watchPositionAsync
+      subscription = await Location.watchPositionAsync(
+        {
+          accuracy: Location.Accuracy.High,
+          timeInterval: 1000,   // Atualiza a cada 1 segundo
+          distanceInterval: 0,  // ou defina em metros se preferir
+        },
+        (loc) => {
+          const { latitude, longitude } = loc.coords;
+          if (lastLocation) {
+            // Calcula distância entre a última posição e a atual
+            const dist = haversineDistance(
+              lastLocation.latitude,
+              lastLocation.longitude,
+              latitude,
+              longitude
+            );
+            // Soma ao total
+            setDistance((prev) => prev + dist);
+          }
+          // Atualiza última localização
+          setLastLocation({ latitude, longitude });
+        }
+      );
+
+      setLocationWatcher(subscription);
+    }
+
+    if (isCycling && isCounting) {
+      startLocationUpdates();
+    }
+
+    // Cleanup
+    return () => {
+      if (subscription) {
+        subscription.remove();
+      }
+      setLocationWatcher(null);
+    };
+  }, [isCycling, isCounting, lastLocation]);
+
+  // ------------------------------------------------------------------
+  // useEffect para checar se alcançou a meta
+  // (passos para Andar/Correr ou distância para Ciclismo)
+  // ------------------------------------------------------------------
+  useEffect(() => {
+    if (!isCycling && steps >= mode.goal) {
       setShowModal(true);
     }
   }, [steps]);
 
-  // Cálculos de distância (média ~0,8m/passo) e calorias (~0,04kcal/passo)
-  const distance = ((steps * 0.8) / 1000).toFixed(2);
-  const calories = (steps * 0.04).toFixed(2);
+  useEffect(() => {
+    if (isCycling && distance >= mode.goal) {
+      setShowModal(true);
+    }
+  }, [distance]);
 
-  const handleCounting = () => {
+  // ------------------------------------------------------------------
+  // FUNÇÃO de iniciar/pausar
+  // ------------------------------------------------------------------
+  const handleToggleCounting = () => {
+    // Se estava ativo, vamos pausar
+    if (isCounting) {
+      // Se for ciclismo, remove subscription
+      if (locationWatcher) {
+        locationWatcher.remove();
+      }
+      setLocationWatcher(null);
+    } else {
+      // Se vamos iniciar novamente no ciclismo, zera localizações?
+      if (isCycling) {
+        setDistance(0);
+        setLastLocation(null);
+      } else {
+        // Zera contagem de passos
+        setSteps(0);
+        setLastStepTime(0);
+      }
+    }
     setIsCounting((prev) => !prev);
   };
+
+  // ------------------------------------------------------------------
+  // RENDERIZAÇÃO
+  // ------------------------------------------------------------------
+  // Cálculo de calorias e distância para Andar/Correr (opcional):
+  // (distância = steps * 0.8m / 1000 => km, calorias ~ 0.04 * steps)
+  const walkingRunningDistance = ((steps * 0.8) / 1000).toFixed(2);
+  const walkingRunningCalories = (steps * 0.04).toFixed(2);
+
+  // Progresso para exibir na barra:
+  let progressValue = 0;
+  let progressLabel = '';
+
+  if (isCycling) {
+    progressValue = distance / mode.goal; // se meta = 10 km, e distance=2 => 0.2
+    progressLabel = distance >= mode.goal
+      ? 'Parabéns! Meta alcançada! 🎉'
+      : `Distância: ${distance.toFixed(2)} km`;
+  } else {
+    progressValue = steps / mode.goal; // se meta=5 passos, e steps=2 => 0.4
+    progressLabel = steps >= mode.goal
+      ? 'Parabéns! Meta alcançada! 🎉'
+      : `Passos: ${steps}`;
+  }
 
   return (
     <View style={styles.container}>
       <View style={styles.header}>
         <Text style={styles.title}>{mode.name}</Text>
-        <Text style={styles.subtitle}>Meta: {mode.goal} passos</Text>
+        {isCycling ? (
+          <Text style={styles.subtitle}>Meta: {mode.goal} km</Text>
+        ) : (
+          <Text style={styles.subtitle}>Meta: {mode.goal} passos</Text>
+        )}
       </View>
 
-      <View style={styles.infoContainer}>
-        <View style={styles.infoCard}>
-          <Text style={styles.infoLabel}>Passos</Text>
-          <Text style={styles.infoValue}>{steps}</Text>
+      {/* Cards de info (para Andar/Correr, exibimos passos/distância/calorias.
+          Para Ciclismo, exibimos distância atual e pode exibir calorias se quiser
+          baseado na distância (ex.: 1 km = ~ 30 calorias, etc. - mas é escolha sua). 
+      */}
+      {!isCycling ? (
+        <View style={styles.infoContainer}>
+          <View style={styles.infoCard}>
+            <Text style={styles.infoLabel}>Passos</Text>
+            <Text style={styles.infoValue}>{steps}</Text>
+          </View>
+          <View style={styles.infoCard}>
+            <Text style={styles.infoLabel}>Distância</Text>
+            <Text style={styles.infoValue}>
+              {walkingRunningDistance} km
+            </Text>
+          </View>
+          <View style={styles.infoCard}>
+            <Text style={styles.infoLabel}>Calorias</Text>
+            <Text style={styles.infoValue}>
+              {walkingRunningCalories} kcal
+            </Text>
+          </View>
         </View>
-        <View style={styles.infoCard}>
-          <Text style={styles.infoLabel}>Distância</Text>
-          <Text style={styles.infoValue}>{distance} km</Text>
+      ) : (
+        <View style={styles.infoContainer}>
+          <View style={styles.infoCard}>
+            <Text style={styles.infoLabel}>Distância</Text>
+            <Text style={styles.infoValue}>
+              {distance.toFixed(2)} km
+            </Text>
+          </View>
+          {/* Se quiser exibir uma estimativa de calorias, você pode criar uma lógica 
+              ex.: 1 km de ciclismo ~ 30 kcal, mas não é padrão fixo. */}
         </View>
-        <View style={styles.infoCard}>
-          <Text style={styles.infoLabel}>Calorias</Text>
-          <Text style={styles.infoValue}>{calories} kcal</Text>
-        </View>
-      </View>
+      )}
 
+      {/* Barra de progresso */}
       <View style={styles.progressContainer}>
         <Progress.Bar
-          progress={steps / mode.goal}
+          progress={progressValue}
           width={300}
           color="#FF4500"
           unfilledColor="#FFE4B5"
           borderWidth={0}
         />
         <Text style={styles.progressText}>
-          {steps >= mode.goal ? 'Parabéns! Meta alcançada! 🎉' : 'Continue caminhando!'}
+          {progressLabel}
         </Text>
       </View>
 
-      {/* Botão personalizado para iniciar/pausar */}
+      {/* Botão Iniciar/Pausar */}
       <TouchableOpacity
         style={[styles.startPauseButton, isCounting && { backgroundColor: '#FF6347' }]}
-        onPress={handleCounting}
+        onPress={handleToggleCounting}
       >
         <Text style={styles.startPauseButtonText}>
-          {isCounting ? 'Pausar Contagem' : 'Iniciar Contagem'}
+          {isCounting ? 'Pausar' : 'Iniciar'}
         </Text>
       </TouchableOpacity>
 
-      {/* Modal de Parabéns */}
+      {/* Modal de Parabéns ao atingir meta */}
       <Modal
         visible={showModal}
         transparent={true}
@@ -156,9 +316,15 @@ export default function ActivityScreen({ route }) {
         <View style={styles.modalContainer}>
           <View style={styles.modalContent}>
             <Text style={styles.modalTitle}>Parabéns! 🎉</Text>
-            <Text style={styles.modalMessage}>
-              Você alcançou sua meta de {mode.goal} passos!
-            </Text>
+            {isCycling ? (
+              <Text style={styles.modalMessage}>
+                Você alcançou sua meta de {mode.goal} km!
+              </Text>
+            ) : (
+              <Text style={styles.modalMessage}>
+                Você alcançou sua meta de {mode.goal} passos!
+              </Text>
+            )}
             <TouchableOpacity
               style={[styles.customButtonModal, { backgroundColor: '#FF4500' }]}
               onPress={() => setShowModal(false)}
@@ -174,7 +340,9 @@ export default function ActivityScreen({ route }) {
   );
 }
 
+// -----------------------------------------------------------
 // Estilos
+// -----------------------------------------------------------
 const styles = StyleSheet.create({
   container: {
     flex: 1,
@@ -197,7 +365,7 @@ const styles = StyleSheet.create({
   },
   infoContainer: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
+    justifyContent: 'space-around',
     marginBottom: 30,
   },
   infoCard: {
@@ -226,6 +394,7 @@ const styles = StyleSheet.create({
     marginTop: 10,
     fontSize: 16,
     color: '#FF6347',
+    textAlign: 'center',
   },
   startPauseButton: {
     backgroundColor: '#FF4500',

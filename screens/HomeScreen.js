@@ -1,12 +1,14 @@
+// screens/HomeScreen.js
+
 import React from 'react';
-import { View, Text, StyleSheet, TouchableOpacity } from 'react-native';
-import { LinearGradient } from 'expo-linear-gradient';
+import { View, Text, StyleSheet, TouchableOpacity, ImageBackground } from 'react-native';
 
 export default function HomeScreen({ navigation }) {
   return (
-    <LinearGradient
-      colors={['#FF7F50', '#FF4500']}
-      style={styles.gradientBackground}
+    <ImageBackground
+      source={require('../assets/images/background-img.png')}
+      style={styles.background}
+      imageStyle={styles.backgroundImage}
     >
       <View style={styles.overlay}>
         <Text style={styles.title}>Bem-vindo ao Monitoramento</Text>
@@ -21,32 +23,34 @@ export default function HomeScreen({ navigation }) {
           <Text style={styles.buttonText}>Selecionar Modo</Text>
         </TouchableOpacity>
       </View>
-    </LinearGradient>
+    </ImageBackground>
   );
 }
 
 const styles = StyleSheet.create({
-  gradientBackground: {
+  background: {
     flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
+  },
+  backgroundImage: {
+    resizeMode: 'cover',
   },
   overlay: {
-    justifyContent: 'center',
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.5)', // Deixa a imagem escurecida
     alignItems: 'center',
+    justifyContent: 'center',
     paddingHorizontal: 20,
-    width: '100%',
   },
   title: {
     fontSize: 26,
     fontWeight: 'bold',
-    color: '#ffffff',
+    color: '#fff',
     textAlign: 'center',
     marginBottom: 10,
   },
   subtitle: {
     fontSize: 16,
-    color: '#ffffff',
+    color: '#fff',
     textAlign: 'center',
     marginBottom: 30,
   },
